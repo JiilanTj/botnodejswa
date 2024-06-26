@@ -1,12 +1,10 @@
 const express = require('express');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const puppeteer = require('puppeteer');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 
 const app = express();
-const connection = require('./config/db');
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -30,49 +28,60 @@ client.on('qr', (qr) => {
 
 client.on('ready', () => {
     console.log('Client is ready!');
-
-    // Existing code for sending messages
-    function intervalfunc() {
-        connection.query("select * from message where status = '0'", function (err, result) {
-            if (err) throw err;
-            result.forEach((message) => {
-                const code = `${message.pesan}`;
-                const number = `${message.number}`;
-                const text = `${code}`;
-                const chatid = number.substring(1) + "@c.us";
-                client.sendMessage(chatid, text);
-                console.log(`${message.pesan}`);
-                connection.query(`update message set status = '1' where status = '0'`, function (err) {
-                    if (err) throw err;
-                    console.log('success kirim pesan', { time: JSON.stringify(new Date()) });
-                });
-            });
-        });
-    }
-    setInterval(intervalfunc, 3000);
 });
 
-// Create new group
-app.post('/create-group', async (req, res) => {
+app.post('/add-members', async (req, res) => {
     const { groupName, participants } = req.body;
+    const delayInSeconds = 1; // Jeda 1 detik antara setiap penambahan
+    const maxRetries = 3; // Maksimal 3 kali percobaan
 
     try {
-        const chat = await client.createGroup(groupName, participants.map(number => number + '@c.us'));
-        res.status(200).json({ status: 'success', chat });
-    } catch (error) {
-        res.status(500).json({ status: 'error', error: error.message });
-    }
-});
+        const chats = await client.getChats();
+        const groupChat = chats.find(chat => chat.name === groupName);
 
-// Add member to group
-app.post('/add-member', async (req, res) => {
-    const { groupId, participant } = req.body;
+        if (!groupChat) {
+            throw new Error('Group not found');
+        }
 
-    try {
+        const groupId = groupChat.id._serialized;
         const chat = await client.getChatById(groupId);
-        await chat.addParticipants([participant + '@c.us']);
-        res.status(200).json({ status: 'success', message: 'Participant added' });
+
+        for (const participant of participants) {
+            let added = false;
+            let retryCount = 0;
+
+            while (!added && retryCount < maxRetries) {
+                try {
+                    // Periksa apakah peserta sudah ada dalam grup
+                    const existingParticipants = chat.participants.map(p => p.id._serialized);
+                    if (!existingParticipants.includes(participant + '@c.us')) {
+                        await chat.addParticipants([participant + '@c.us']);
+                        console.log(`Added participant: ${participant}`);
+                        added = true;
+                    } else {
+                        console.log(`Participant ${participant} already in the group`);
+                        added = true;
+                    }
+                } catch (error) {
+                    console.error(`Error adding participant ${participant}:`, error.message);
+                    retryCount++;
+                    if (retryCount < maxRetries) {
+                        console.log(`Retrying to add participant ${participant} (Attempt ${retryCount + 1}/${maxRetries})`);
+                        await new Promise(resolve => setTimeout(resolve, delayInSeconds * 1000));
+                    }
+                }
+            }
+
+            if (!added) {
+                console.error(`Failed to add participant ${participant} after ${maxRetries} attempts`);
+            } else {
+                await new Promise(resolve => setTimeout(resolve, delayInSeconds * 1000));
+            }
+        }
+
+        res.status(200).json({ status: 'success', message: 'Participants added to group' });
     } catch (error) {
+        console.error('Error while adding participants to group:', error.message);
         res.status(500).json({ status: 'error', error: error.message });
     }
 });
